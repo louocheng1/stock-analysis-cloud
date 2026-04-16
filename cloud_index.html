@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>教學策略研究 [雲端版]</title>
+    <!-- 引入 Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=Noto+Sans+TC:wght@300;400;700&display=swap" rel="stylesheet">
+    <!-- 引入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Inter', 'Noto Sans TC', 'sans-serif'] },
+                    colors: {
+                        glass: 'rgba(255, 255, 255, 0.05)',
+                        'glass-border': 'rgba(255, 255, 255, 0.1)',
+                        accent: '#3b82f6',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            background-color: #0c111d;
+            background-image: 
+                radial-gradient(at 0% 0%, hsla(253,16%,12%,1) 0, transparent 50%), 
+                radial-gradient(at 50% 0%, hsla(225,39%,20%,0.2) 0, transparent 50%), 
+                radial-gradient(at 100% 0%, hsla(339,49%,20%,0.2) 0, transparent 50%);
+            background-attachment: fixed;
+            color: #f8fafc;
+            min-height: 100vh;
+        }
+        .glass-panel {
+            background: rgba(15, 23, 42, 0.6);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 1.5rem;
+        }
+        .signal-row { transition: all 0.2s; }
+        .signal-row:hover { background: rgba(59, 130, 246, 0.08); transform: scale(1.002); }
+    </style>
+</head>
+<body class="p-4 md:p-8">
+
+    <div class="max-w-7xl mx-auto space-y-6">
+        
+        <!-- Header -->
+        <header class="flex flex-col md:flex-row justify-between items-center gap-6 glass-panel p-8">
+            <div>
+                <div class="flex items-center gap-3">
+                    <span class="bg-blue-500/20 text-blue-400 text-xs px-2 py-1 rounded-full font-bold border border-blue-500/30">CLOUD EDITION</span>
+                    <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-indigo-400">
+                        教學策略研究
+                    </h1>
+                </div>
+                <p class="text-slate-400 mt-2">雲端全自動掃描版本｜每日 15:15 自動更新｜優選 PEG < 0.75 之潛力標的</p>
+            </div>
+            
+            <div id="connection-status" class="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/20 px-4 py-2 rounded-xl">
+                 <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+                 <span class="text-emerald-400 text-sm font-bold">雲端節點連線中</span>
+            </div>
+        </header>
+
+        <!-- Stats Section -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div class="glass-panel p-6">
+                <p class="text-slate-400 text-sm">最新掃描日期</p>
+                <div id="latest-date" class="text-2xl font-bold mt-1">--</div>
+            </div>
+            <div class="glass-panel p-6">
+                <p class="text-slate-400 text-sm">本次發現信號</p>
+                <div id="latest-count" class="text-2xl font-bold mt-1 text-emerald-400">--</div>
+            </div>
+            <div class="glass-panel p-6">
+                <p class="text-slate-400 text-sm">自動化狀態</p>
+                <div class="text-2xl font-bold mt-1 text-blue-400">執行中 (GitHub)</div>
+            </div>
+        </div>
+
+        <!-- Main Results -->
+        <div class="glass-panel p-1 border-hidden overflow-hidden">
+            <div class="overflow-x-auto">
+                <table class="w-full text-left text-sm whitespace-nowrap">
+                    <thead>
+                        <tr class="bg-slate-900/40 text-slate-400 border-b border-white/5">
+                            <th class="p-5 font-semibold">股票標的</th>
+                            <th class="p-5 font-semibold">產業別</th>
+                            <th class="p-5 font-semibold">信號日 (漲停創高)</th>
+                            <th class="p-5 font-semibold">拉回日 (5MA守穩)</th>
+                            <th class="p-5 font-semibold text-emerald-400">PEG 估值</th>
+                            <th class="p-5 font-semibold">MA5 價位</th>
+                        </tr>
+                    </thead>
+                    <tbody id="results-tbody" class="divide-y divide-white/5">
+                        <!-- Loading skeleton could go here -->
+                        <tr><td colspan="6" class="p-20 text-center text-slate-500">正在同步雲端伺服器資料...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        // --- 設定區 (這部分需要使用者將 Supabase 資訊填入) ---
+        // 以下為示範佔位符，部署時請手動填寫或透過自動化腳本注入
+        const SUPABASE_URL = 'YOUR_SUPABASE_URL';
+        const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+        // --------------------------------------------------
+
+        let supabase;
+
+        async function init() {
+            if (SUPABASE_URL === 'YOUR_SUPABASE_URL') {
+                document.getElementById('results-tbody').innerHTML = '<tr><td colspan="6" class="p-20 text-center text-red-400">⚠️ 請在原始碼中設定 SUPABASE_URL 與 ANON_KEY</td></tr>';
+                return;
+            }
+
+            supabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+            fetchData();
+        }
+
+        async function fetchData() {
+            try {
+                const { data, error } = await supabase
+                    .from('stock_scan_results')
+                    .select('*')
+                    .order('scan_date', { ascending: false })
+                    .limit(1);
+
+                if (error) throw error;
+
+                const tbody = document.getElementById('results-tbody');
+                if (!data || data.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="6" class="p-20 text-center">📭 目前雲端資料庫尚無記錄。</td></tr>';
+                    return;
+                }
+
+                const latest = data[0];
+                document.getElementById('latest-date').textContent = latest.scan_date;
+                document.getElementById('latest-count').textContent = `${latest.signal_count} 檔`;
+
+                let html = '';
+                latest.results.forEach(item => {
+                    html += `
+                        <tr class="signal-row">
+                            <td class="p-5">
+                                <a href="https://tw.stock.yahoo.com/quote/${item.symbol}" target="_blank" class="group">
+                                    <div class="font-bold text-blue-400 group-hover:text-blue-300 underline underline-offset-4 decoration-blue-500/20">${item.name}</div>
+                                    <div class="text-xs text-slate-500 mt-1">${item.symbol}.TW</div>
+                                </a>
+                            </td>
+                            <td class="p-5">
+                                <span class="bg-slate-800 text-slate-400 px-2 py-1 rounded text-xs">${item.industry || '--'}</span>
+                            </td>
+                            <td class="p-5">
+                                <div class="text-slate-200">${item.breakout_date}</div>
+                                <div class="text-xs text-emerald-400">昨收 ${item.breakout_price}</div>
+                            </td>
+                            <td class="p-5">
+                                <div class="text-slate-200">${item.pullback_date}</div>
+                                <div class="text-xs text-blue-400">守穩 ${item.pullback_price}</div>
+                            </td>
+                            <td class="p-5 font-bold text-emerald-400 text-lg">${item.peg || '--'}</td>
+                            <td class="p-5 font-mono text-slate-400">${item.ma5}</td>
+                        </tr>
+                    `;
+                });
+                tbody.innerHTML = html;
+
+            } catch (err) {
+                console.error(err);
+                document.getElementById('results-tbody').innerHTML = `<tr><td colspan="6" class="p-20 text-center text-red-500">❌ 無法連線至資料庫: ${err.message}</td></tr>`;
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>
