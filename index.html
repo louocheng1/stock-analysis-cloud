@@ -115,21 +115,27 @@
         const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdtY2dmdmdra3dlZmh0am12YXdqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMjI5NzUsImV4cCI6MjA5MTg5ODk3NX0.cu0qrV9cz2lPSt1Lp6j59JroqLUSVYt-zg9tzpxDshM';
         // --------------------------------------------------
 
-        let supabase;
+        let supabaseClient;
 
         async function init() {
-            if (SUPABASE_URL === 'YOUR_SUPABASE_URL') {
-                document.getElementById('results-tbody').innerHTML = '<tr><td colspan="6" class="p-20 text-center text-red-400">⚠️ 請在原始碼中設定 SUPABASE_URL 與 ANON_KEY</td></tr>';
-                return;
-            }
+            try {
+                if (SUPABASE_URL === 'YOUR_SUPABASE_URL') {
+                    document.getElementById('results-tbody').innerHTML = '<tr><td colspan="6" class="p-20 text-center text-red-400">⚠️ 請在原始碼中設定 SUPABASE_URL 與 ANON_KEY</td></tr>';
+                    return;
+                }
 
-            supabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-            fetchData();
+                // 使用全域的 supabase 物件來建立 client，避免與 local 變數名稱衝突
+                supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+                fetchData();
+            } catch (err) {
+                console.error('Initialization error:', err);
+                document.getElementById('results-tbody').innerHTML = `<tr><td colspan="6" class="p-20 text-center text-red-500">❌ 初始化失敗: ${err.message}</td></tr>`;
+            }
         }
 
         async function fetchData() {
             try {
-                const { data, error } = await supabase
+                const { data, error } = await supabaseClient
                     .from('stock_scan_results')
                     .select('*')
                     .order('scan_date', { ascending: false })
