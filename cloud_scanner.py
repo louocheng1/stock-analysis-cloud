@@ -6,7 +6,7 @@ import os
 import requests
 import warnings
 import json
-from supabase import create_client, Client
+# Removed supabase-py library dependency for better stability
 
 # 忽略警告
 warnings.filterwarnings('ignore')
@@ -28,14 +28,12 @@ class CloudStockScanner:
     def __init__(self):
         # 雲端環境變數 (GitHub Secrets / Local .env)
         self.supabase_url = os.environ.get("SUPABASE_URL")
-        self.supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") # 建議用 Service Role 以便寫入
+        # 優先使用 Service Role Key 以便寫入，若無則嘗試用 Anon Key
+        self.supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_ANON_KEY")
         self.tg_token = os.environ.get("TELEGRAM_BOT_TOKEN")
         self.tg_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
         
-        if self.supabase_url and self.supabase_key:
-            self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
-        else:
-            self.supabase = None
+        if not self.supabase_url or not self.supabase_key:
             print("⚠️ 警告: Supabase 未配置，將無法存入雲端數據。")
 
     def check_peg_ratio(self, symbol_full):
@@ -154,21 +152,39 @@ class CloudStockScanner:
             print(f"Failed to send TG: {e}")
 
     def upload_to_supabase(self, results):
-        if not self.supabase: return
+        if not self.supabase_url or not self.supabase_key:
+            return
+            
         try:
             date_str = datetime.now().strftime('%Y-%m-%d')
-            # 刪除當日重複資料
-            self.supabase.table("stock_scan_results").delete().eq("scan_date", date_str).execute()
-            # 插入新資料
+            headers = {
+                "apikey": self.supabase_key,
+                "Authorization": f"Bearer {self.supabase_key}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates"
+            }
+            
+            # 1. 刪除當日重複資料 (REST API DELETE)
+            del_url = f"{self.supabase_url}/rest/v1/stock_scan_results?scan_date=eq.{date_str}"
+            requests.delete(del_url, headers=headers, timeout=10)
+            
+            # 2. 插入新資料 (REST API POST)
+            post_url = f"{self.supabase_url}/rest/v1/stock_scan_results"
             data = {
                 "scan_date": date_str,
                 "results": results,
                 "signal_count": len(results)
             }
-            self.supabase.table("stock_scan_results").insert(data).execute()
-            print(f"Successfully uploaded {len(results)} results to Supabase.")
+            
+            response = requests.post(post_url, headers=headers, data=json.dumps(data), timeout=10)
+            
+            if response.status_code in [200, 201]:
+                print(f"Successfully uploaded {len(results)} results to Supabase via REST API.")
+            else:
+                print(f"Supabase upload error (HTTP {response.status_code}): {response.text}")
+                
         except Exception as e:
-            print(f"Supabase upload error: {e}")
+            print(f"Supabase upload exception: {e}")
 
     def run(self):
         print(f"Starting cloud scan: {datetime.now()}")
