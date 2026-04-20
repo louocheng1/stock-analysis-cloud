@@ -27,14 +27,26 @@ TRADITIONAL_INDUSTRIES = {
 class CloudStockScanner:
     def __init__(self):
         # 雲端環境變數 (GitHub Secrets / Local .env)
+        # 雲端環境變數 (GitHub Secrets / Local .env)
         self.supabase_url = os.environ.get("SUPABASE_URL")
         # 優先使用 Service Role Key 以便寫入，若無則嘗試用 Anon Key
         self.supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_ANON_KEY")
         self.tg_token = os.environ.get("TELEGRAM_BOT_TOKEN")
         self.tg_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
+        # 檢查關鍵配置並列印診斷資訊
+        print(f"--- 雲端診斷資訊 ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ---")
+        config_status = {
+            "SUPABASE_URL": "✅ 已配置" if self.supabase_url else "❌ 未配置",
+            "SUPABASE_KEY": "✅ 已配置" if self.supabase_key else "❌ 未配置",
+            "TG_TOKEN": "✅ 已配置" if self.tg_token else "❌ 未配置",
+            "TG_CHAT_ID": "✅ 已配置" if self.tg_chat_id else "❌ 未配置"
+        }
+        for k, v in config_status.items():
+            print(f"{k:25}: {v}")
         
         if not self.supabase_url or not self.supabase_key:
-            print("⚠️ 警告: Supabase 未配置，將無法存入雲端數據。")
+            print("⚠️ 嚴重警告: Supabase 連線參數不齊全，本次掃描將無法同步資料。")
 
     def check_peg_ratio(self, symbol_full):
         """計算 PEG (本益成長比) 門檻: 小於 0.75"""
@@ -178,10 +190,12 @@ class CloudStockScanner:
             
             response = requests.post(post_url, headers=headers, data=json.dumps(data), timeout=10)
             
-            if response.status_code in [200, 201]:
-                print(f"Successfully uploaded {len(results)} results to Supabase via REST API.")
+                print(f"✅ 成功! 已上傳 {len(results)} 檔標的至 Supabase。")
             else:
-                print(f"Supabase upload error (HTTP {response.status_code}): {response.text}")
+                print(f"❌ Supabase 上傳失敗 (HTTP {response.status_code}): {response.text}")
+                # 嘗試幫助診斷常見錯誤
+                if response.status_code == 401: print("   提示: 請檢查 SUPABASE_SERVICE_ROLE_KEY 是否正確。")
+                if response.status_code == 404: print("   提示: 請檢查資料表名稱(stock_scan_results)是否正確。")
                 
         except Exception as e:
             print(f"Supabase upload exception: {e}")

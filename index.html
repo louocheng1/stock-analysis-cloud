@@ -71,8 +71,8 @@
         <!-- Stats Section -->
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div class="glass-panel p-6">
-                <p class="text-slate-400 text-sm">最新掃描日期</p>
                 <div id="latest-date" class="text-2xl font-bold mt-1">--</div>
+                <div id="sync-time" class="text-xs text-slate-500 mt-1">最後同步: --</div>
             </div>
             <div class="glass-panel p-6">
                 <p class="text-slate-400 text-sm">本次發現信號</p>
@@ -152,6 +152,12 @@
                 const latest = data[0];
                 document.getElementById('latest-date').textContent = latest.scan_date;
                 document.getElementById('latest-count').textContent = `${latest.signal_count} 檔`;
+                
+                // 格式化同步時間 (台北時間)
+                if (latest.created_at) {
+                    const syncDate = new Date(latest.created_at);
+                    document.getElementById('sync-time').textContent = `最後同步: ${syncDate.toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })}`;
+                }
 
                 let html = '';
                 latest.results.forEach(item => {
