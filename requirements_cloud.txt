@@ -4,3 +4,5 @@ twstock
 requests
 supabase
 python-dotenv
+lxml
+html5lib

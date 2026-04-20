@@ -28,11 +28,11 @@ class CloudStockScanner:
     def __init__(self):
         # 雲端環境變數 (GitHub Secrets / Local .env)
         # 雲端環境變數 (GitHub Secrets / Local .env)
-        self.supabase_url = os.environ.get("SUPABASE_URL")
-        # 優先使用 Service Role Key 以便寫入，若無則嘗試用 Anon Key
-        self.supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_ANON_KEY")
-        self.tg_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-        self.tg_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        # 加上 .strip() 防止 GitHub Secrets 結尾帶著換行符號或空格
+        self.supabase_url = (os.environ.get("SUPABASE_URL") or "").strip()
+        self.supabase_key = (os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_ANON_KEY") or "").strip()
+        self.tg_token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+        self.tg_chat_id = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
 
         # 檢查關鍵配置並列印診斷資訊
         print(f"--- 雲端診斷資訊 ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ---")
@@ -178,7 +178,9 @@ class CloudStockScanner:
             
             # 1. 刪除當日重複資料 (REST API DELETE)
             del_url = f"{self.supabase_url}/rest/v1/stock_scan_results?scan_date=eq.{date_str}"
-            requests.delete(del_url, headers=headers, timeout=10)
+            del_resp = requests.delete(del_url, headers=headers, timeout=10)
+            if del_resp.status_code not in [200, 204]:
+                print(f"⚠️ 指示: DELETE 本日舊紀錄狀態: {del_resp.status_code} (若為 401 可能權限不足)")
             
             # 2. 插入新資料 (REST API POST)
             post_url = f"{self.supabase_url}/rest/v1/stock_scan_results"
