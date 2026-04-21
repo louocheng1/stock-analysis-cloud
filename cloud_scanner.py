@@ -192,6 +192,7 @@ class CloudStockScanner:
             
             response = requests.post(post_url, headers=headers, data=json.dumps(data), timeout=10)
             
+            if response.status_code in [200, 201, 204]:
                 print(f"✅ 成功! 已上傳 {len(results)} 檔標的至 Supabase。")
             else:
                 print(f"❌ Supabase 上傳失敗 (HTTP {response.status_code}): {response.text}")
