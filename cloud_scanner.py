@@ -6,7 +6,8 @@ import os
 import requests
 import warnings
 import json
-# Removed supabase-py library dependency for better stability
+import traceback
+import sys
 
 # 忽略警告
 warnings.filterwarnings('ignore')
@@ -26,16 +27,18 @@ TRADITIONAL_INDUSTRIES = {
 
 class CloudStockScanner:
     def __init__(self):
-        # 雲端環境變數 (GitHub Secrets / Local .env)
-        # 雲端環境變數 (GitHub Secrets / Local .env)
-        # 加上 .strip() 防止 GitHub Secrets 結尾帶著換行符號或空格
+        # 雲端環境變數
         self.supabase_url = (os.environ.get("SUPABASE_URL") or "").strip()
         self.supabase_key = (os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_ANON_KEY") or "").strip()
         self.tg_token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
         self.tg_chat_id = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
 
-        # 檢查關鍵配置並列印診斷資訊
-        print(f"--- 雲端診斷資訊 ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ---")
+        # 輸出診斷資訊
+        print(f"\n[Diagnostic] System Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"[Diagnostic] Python Version: {sys.version}")
+        print(f"[Diagnostic] Pandas Version: {pd.__version__}")
+        print(f"[Diagnostic] YFinance Version: {yf.__version__}")
+        
         config_status = {
             "SUPABASE_URL": "✅ 已配置" if self.supabase_url else "❌ 未配置",
             "SUPABASE_KEY": "✅ 已配置" if self.supabase_key else "❌ 未配置",
@@ -44,12 +47,8 @@ class CloudStockScanner:
         }
         for k, v in config_status.items():
             print(f"{k:25}: {v}")
-        
-        if not self.supabase_url or not self.supabase_key:
-            print("⚠️ 嚴重警告: Supabase 連線參數不齊全，本次掃描將無法同步資料。")
 
     def check_peg_ratio(self, symbol_full):
-        """計算 PEG (本益成長比) 門檻: 小於 0.75"""
         try:
             ticker = yf.Ticker(symbol_full)
             info = ticker.info
@@ -60,34 +59,42 @@ class CloudStockScanner:
                 return False, None
             
             peg = pe / (growth * 100)
-            if peg < 0.75:
-                return True, round(peg, 2)
-            return False, round(peg, 2)
-        except:
+            return (peg < 0.75), round(peg, 2)
+        except Exception as e:
+            # print(f"  DEBUG: PEG check error for {symbol_full}: {e}")
             return False, None
 
     def get_taiwan_stock_codes(self):
-        codes = twstock.codes
-        tse_otc_codes = []
-        for code, info in codes.items():
-            if info.market in ['上市', '上櫃'] and len(code) == 4 and code.isdigit():
-                if info.group in TRADITIONAL_INDUSTRIES:
-                    continue
-                suffix = ".TW" if info.market == '上市' else ".TWO"
-                tse_otc_codes.append((f"{code}{suffix}", info.name, info.group))
-        return tse_otc_codes
+        try:
+            codes = twstock.codes
+            tse_otc_codes = []
+            for code, info in codes.items():
+                if info.market in ['上市', '上櫃'] and len(code) == 4 and code.isdigit():
+                    if info.group in TRADITIONAL_INDUSTRIES:
+                        continue
+                    suffix = ".TW" if info.market == '上市' else ".TWO"
+                    tse_otc_codes.append((f"{code}{suffix}", info.name, info.group))
+            print(f"[Info] Found {len(tse_otc_codes)} candidate stocks after filtering.")
+            return tse_otc_codes
+        except Exception as e:
+            print(f"[Critical] Failed to load stock codes: {e}")
+            raise e
 
     def process_stock_data(self, df, symbol, name, group_name=""):
         try:
             required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+            if df is None or df.empty: return None
             if not all(col in df.columns for col in required_cols): return None
+            
             df = df[required_cols].copy()
             df.dropna(subset=['Close', 'Volume'], inplace=True)
 
             cutoff_date = (datetime.now() - timedelta(days=180)).date()
             if len(df[df.index.date >= cutoff_date]) < 20: return None
-            avg_volume = df[df.index.date >= cutoff_date]['Volume'].mean()
-            if avg_volume < MIN_AVG_VOLUME_SHARES: return None
+            
+            recent_data = df[df.index.date >= cutoff_date]
+            avg_volume = recent_data['Volume'].mean()
+            if pd.isna(avg_volume) or avg_volume < MIN_AVG_VOLUME_SHARES: return None
 
             df['Prev_Close'] = df['Close'].shift(1)
             df['Price_Change'] = (df['Close'] - df['Prev_Close']) / df['Prev_Close']
@@ -117,9 +124,8 @@ class CloudStockScanner:
                         if p_row['Low'] <= (p_row['MA5'] * 1.005) and p_row['Close'] >= p_row['MA5']:
                             is_low_peg, peg_val = self.check_peg_ratio(symbol)
                             if is_low_peg:
-                                sym_code = symbol.split('.')[0]
                                 results.append({
-                                    'symbol': sym_code,
+                                    'symbol': symbol.split('.')[0],
                                     'name': name,
                                     'industry': group_name,
                                     'breakout_date': dt.strftime('%Y-%m-%d'),
@@ -130,23 +136,24 @@ class CloudStockScanner:
                                     'peg': peg_val,
                                     'vol_ma5_lots': round(float(p_row['Vol_MA5']) / 1000, 1),
                                     'vol_ma20_lots': round(float(p_row['Vol_MA20']) / 1000, 1),
-                                    'avg_vol_6m_lots': round(avg_volume / 1000, 1)
+                                    'avg_vol_6m_lots': round(float(avg_volume) / 1000, 1)
                                 })
                                 break
             return results
-        except:
+        except Exception as e:
+            # Silent skip for single stock processing errors to avoid crashing the whole scan
             return None
 
     def send_telegram_notification(self, results):
         if not self.tg_token or not self.tg_chat_id:
-            print("Telegram credentials missing.")
+            print("[Info] Telegram credentials missing, skipping notification.")
             return
             
         date_str = datetime.now().strftime('%Y-%m-%d')
+        msg = f"📊 <b>雲端台股掃描總結 ({date_str})</b>\n\n"
         if not results:
-            msg = f"📊 <b>雲端台股掃描總結 ({date_str})</b>\n\n本日未發現符合教學策略之標的。"
+            msg += "本日未發現符合教學策略之標的。"
         else:
-            msg = f"📊 <b>雲端台股掃描總結 ({date_str})</b>\n\n"
             msg += f"🔥 <b>共發現 {len(results)} 檔潛力標的：</b>\n"
             for idx, res in enumerate(results[:10]):
                 msg += f"\n{idx+1}. <b>{res['name']} ({res['symbol']})</b>\n"
@@ -158,13 +165,14 @@ class CloudStockScanner:
         
         url = f"https://api.telegram.org/bot{self.tg_token}/sendMessage"
         try:
-            requests.post(url, json={"chat_id": self.tg_chat_id, "text": msg, "parse_mode": "HTML"}, timeout=10)
-            print("Telegram notification sent.")
+            resp = requests.post(url, json={"chat_id": self.tg_chat_id, "text": msg, "parse_mode": "HTML"}, timeout=15)
+            print(f"[Info] Telegram Status: {resp.status_code}")
         except Exception as e:
-            print(f"Failed to send TG: {e}")
+            print(f"[Error] Failed to send TG: {e}")
 
     def upload_to_supabase(self, results):
         if not self.supabase_url or not self.supabase_key:
+            print("[Warning] Supabase configured but missing variables, skipping upload.")
             return
             
         try:
@@ -172,64 +180,86 @@ class CloudStockScanner:
             headers = {
                 "apikey": self.supabase_key,
                 "Authorization": f"Bearer {self.supabase_key}",
-                "Content-Type": "application/json",
-                "Prefer": "resolution=merge-duplicates"
+                "Content-Type": "application/json"
             }
             
-            # 1. 刪除當日重複資料 (REST API DELETE)
+            # 刪除舊紀錄
             del_url = f"{self.supabase_url}/rest/v1/stock_scan_results?scan_date=eq.{date_str}"
-            del_resp = requests.delete(del_url, headers=headers, timeout=10)
-            if del_resp.status_code not in [200, 204]:
-                print(f"⚠️ 指示: DELETE 本日舊紀錄狀態: {del_resp.status_code} (若為 401 可能權限不足)")
+            requests.delete(del_url, headers=headers, timeout=15)
             
-            # 2. 插入新資料 (REST API POST)
+            # 插入新紀錄
             post_url = f"{self.supabase_url}/rest/v1/stock_scan_results"
-            data = {
+            payload = {
                 "scan_date": date_str,
                 "results": results,
                 "signal_count": len(results)
             }
             
-            response = requests.post(post_url, headers=headers, data=json.dumps(data), timeout=10)
-            
-            if response.status_code in [200, 201, 204]:
-                print(f"✅ 成功! 已上傳 {len(results)} 檔標的至 Supabase。")
+            resp = requests.post(post_url, headers=headers, data=json.dumps(payload), timeout=15)
+            if resp.status_code in [200, 201, 204]:
+                print(f"✅ Supabase Upload Success! ({len(results)} items)")
             else:
-                print(f"❌ Supabase 上傳失敗 (HTTP {response.status_code}): {response.text}")
-                # 嘗試幫助診斷常見錯誤
-                if response.status_code == 401: print("   提示: 請檢查 SUPABASE_SERVICE_ROLE_KEY 是否正確。")
-                if response.status_code == 404: print("   提示: 請檢查資料表名稱(stock_scan_results)是否正確。")
+                print(f"❌ Supabase Upload Failed: {resp.status_code} - {resp.text}")
                 
         except Exception as e:
-            print(f"Supabase upload exception: {e}")
+            print(f"[Error] Supabase Error: {e}")
 
     def run(self):
-        print(f"Starting cloud scan: {datetime.now()}")
-        stocks = self.get_taiwan_stock_codes()
-        all_matches = []
-        batch_size = 50
-        
-        for i in range(0, len(stocks), batch_size):
-            batch = stocks[i:i+batch_size]
-            symbols = [s[0] for s in batch]
-            try:
-                df_all = yf.download(symbols, period="1y", interval="1d", progress=False)
-                if df_all.empty: continue
-                for s in batch:
-                    try:
-                        df_stock = df_all.xs(s[0], level=1, axis=1) if len(symbols) > 1 else df_all
-                        res = self.process_stock_data(df_stock, s[0], s[1], s[2])
-                        if res: all_matches.extend(res)
-                    except: continue
-            except: continue
+        try:
+            print(f"\n[Start] Launching scanner batch mode...")
+            stocks = self.get_taiwan_stock_codes()
+            all_matches = []
+            batch_size = 50
             
-        # 排序
-        all_matches.sort(key=lambda x: x['pullback_date'], reverse=True)
-        
-        # 上傳與通知
-        self.upload_to_supabase(all_matches)
-        self.send_telegram_notification(all_matches)
-        print("Cloud scan finished.")
+            num_batches = (len(stocks) + batch_size - 1) // batch_size
+            
+            for i in range(0, len(stocks), batch_size):
+                batch_idx = i // batch_size + 1
+                batch = stocks[i:i+batch_size]
+                symbols = [s[0] for s in batch]
+                
+                print(f"[Batch {batch_idx}/{num_batches}] Downloading {len(symbols)} symbols...")
+                
+                try:
+                    df_all = yf.download(symbols, period="1y", interval="1d", progress=False, group_by='ticker')
+                    
+                    if df_all is None or df_all.empty:
+                        print(f"  [Skip] Batch {batch_idx} returned no data.")
+                        continue
+                        
+                    for s_code, s_name, s_group in batch:
+                        try:
+                            # 判斷 MultiIndex 結構 (yfinance 不同版本回傳格式可能不同)
+                            if isinstance(df_all.columns, pd.MultiIndex):
+                                if s_code in df_all.columns.levels[0]:
+                                    df_stock = df_all[s_code]
+                                else:
+                                    continue
+                            else:
+                                df_stock = df_all
+                                
+                            res = self.process_stock_data(df_stock, s_code, s_name, s_group)
+                            if res: 
+                                all_matches.extend(res)
+                        except Exception as inner_e:
+                            continue # Skip one stock error
+                            
+                except Exception as batch_e:
+                    print(f"  [Error] Batch {batch_idx} failed: {batch_e}")
+                    continue
+            
+            # 排序與結尾
+            all_matches.sort(key=lambda x: x['pullback_date'], reverse=True)
+            self.upload_to_supabase(all_matches)
+            self.send_telegram_notification(all_matches)
+            print(f"\n[Finish] Completed successfully. Total Matches: {len(all_matches)}")
+            
+        except Exception as e:
+            print("\n" + "!"*50)
+            print("[CRITICAL ERROR] Scanner crashed!")
+            traceback.print_exc()
+            print("!"*50)
+            sys.exit(1)
 
 if __name__ == "__main__":
     scanner = CloudStockScanner()
