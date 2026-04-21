@@ -2,7 +2,7 @@ name: Daily Stock Scan
 
 on:
   schedule:
-    - cron: '02 4 * * *' # 每天 UTC 03:40 (台北時間 11:40) 測試用
+    - cron: '02 10 * * *' # 每天 UTC 03:40 (台北時間 11:40) 測試用
   workflow_dispatch: # 允許手動觸發測試
 
 jobs:
