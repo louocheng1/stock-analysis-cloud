@@ -1,147 +1,239 @@
+import yfinance as yf
+import pandas as pd
+import twstock
+from datetime import datetime, timedelta
 import os
+import requests
+import warnings
 import json
-import time
+import traceback
 import sys
-import re
-from process_ods_to_db import run_ods_sync
-from refresh_bank import get_node_descriptions, load_existing_extra_bank, generate_questions, EXTRA_DATA_PATH, CHECKPOINT_PATH
-import refresh_bank
-
-def main():
-    print("\n" + "="*50)
-    print("[AI Exam Tool] All-in-One Sync")
-    print("="*50)
-
-
-    # 第一階段：同步學生 ODS 數據
-    print("\n[Step 1] Syncing Student ODS Data...")
-    student_records, ods_nodes = run_ods_sync()
-    
-    if not student_records:
-        print("[Error] Failed to read ODS data.")
-        return
-
-    print(f"[OK] Successfully processed {len(student_records)} students.")
-    print(f"[Info] Detected {len(ods_nodes)} unique nodes in ODS: {', '.join(sorted(ods_nodes)[:10])}...")
-    
-    # 第二階段：稽核本地題庫完整性
-    print("\n[Step 2] Checking Local Bank Coverage...")
-    
-    # 載入全部知識點定義
-    all_descriptions = get_node_descriptions()
-    # 載入現有題庫 (擴充)
-    existing_extra = load_existing_extra_bank()
-    
-    # 讀取原始 data.js 中的 QUESTION_BANK (主題庫)
-    def load_master_bank():
+# 忽略警告
+warnings.filterwarnings('ignore')
+# 常數設定
+MIN_AVG_VOLUME_LOTS = 200
+MIN_AVG_VOLUME_SHARES = MIN_AVG_VOLUME_LOTS * 1000
+# 傳產黑名單
+TRADITIONAL_INDUSTRIES = {
+    '水泥工業', '食品工業', '塑膠工業', '紡織纖維', '玻璃陶瓷',
+    '造紙工業', '鋼鐵工業', '橡膠工業', '汽車工業', '建材營造業',
+    '航運業', '觀光餐旅', '貿易百貨業', '油電燃氣業', '其他業',
+    '化學工業', '電機機械', '電器電纜', '居家生活', '運動休閒',
+    '農業科技業'
+}
+class CloudStockScanner:
+    def __init__(self):
+        # 雲端環境變數
+        self.supabase_url = (os.environ.get("SUPABASE_URL") or "").strip()
+        self.supabase_key = (os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_ANON_KEY") or "").strip()
+        self.tg_token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+        self.tg_chat_id = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+        # 輸出診斷資訊
+        print(f"\n[Diagnostic] System Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"[Diagnostic] Python Version: {sys.version}")
+        print(f"[Diagnostic] Pandas Version: {pd.__version__}")
+        print(f"[Diagnostic] YFinance Version: {yf.__version__}")
+        
+        config_status = {
+            "SUPABASE_URL": "✅ 已配置" if self.supabase_url else "❌ 未配置",
+            "SUPABASE_KEY": "✅ 已配置" if self.supabase_key else "❌ 未配置",
+            "TG_TOKEN": "✅ 已配置" if self.tg_token else "❌ 未配置",
+            "TG_CHAT_ID": "✅ 已配置" if self.tg_chat_id else "❌ 未配置"
+        }
+        for k, v in config_status.items():
+            print(f"{k:25}: {v}")
+    def check_peg_ratio(self, symbol_full):
         try:
-            with open("data.js", "r", encoding="utf-8") as f:
-                content = f.read()
-            # 找到 const QUESTION_BANK = { ... };
-            match = re.search(r"const QUESTION_BANK = (\{.*?\});", content, re.DOTALL)
-            if match:
-                return json.loads(match.group(1))
-        except: pass
-        return {}
-    
-    master_bank = load_master_bank()
-    
-    def is_placeholder(qs):
-        if not qs: return True
-        real_qs = []
-        seen_questions = set()
-        for q in qs:
-            q_text = q.get('q', "").strip()
-            options = q.get('options', [])
-            exp = q.get('exp', "")
+            ticker = yf.Ticker(symbol_full)
+            info = ticker.info
+            pe = info.get('trailingPE')
+            growth = info.get('earningsGrowth')
             
-            # 檢查是否為重複題目
-            if q_text in seen_questions:
-                continue
-            seen_questions.add(q_text)
+            if pe is None or growth is None or growth <= 0:
+                return False, None
             
-            # 檢查長度是否太短 (過於基礎)
-            if len(q_text) < 10:
-                continue
-                
-            has_fake1 = any("錯誤值" in opt or "正確結果" in opt for opt in options)
-            has_fake2 = "基礎題型" in exp
-            has_fake3 = any("此為正確的觀念描述" in opt or "該觀念的錯誤誤解" in opt or "完全不相干的描述" in opt for opt in options)
+            peg = pe / (growth * 100)
+            return (peg < 0.75), round(peg, 2)
+        except Exception as e:
+            return False, None
+    def get_taiwan_stock_codes(self):
+        try:
+            codes = twstock.codes
+            tse_otc_codes = []
+            for code, info in codes.items():
+                if info.market in ['上市', '上櫃'] and len(code) == 4 and code.isdigit():
+                    if info.group in TRADITIONAL_INDUSTRIES:
+                        continue
+                    suffix = ".TW" if info.market == '上市' else ".TWO"
+                    tse_otc_codes.append((f"{code}{suffix}", info.name, info.group))
+            print(f"[Info] Found {len(tse_otc_codes)} candidate stocks after filtering.")
+            return tse_otc_codes
+        except Exception as e:
+            print(f"[Critical] Failed to load stock codes: {e}")
+            raise e
+    def process_stock_data(self, df, symbol, name, group_name=""):
+        try:
+            required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+            if df is None or df.empty: return None
+            if not all(col in df.columns for col in required_cols): return None
             
-            if not has_fake1 and not has_fake2 and not has_fake3:
-                real_qs.append(q)
-        
-        # 如果有效題目太少 (少於 2 題)，也視為需要補題
-        return len(real_qs) < 2
-
-    # 找出 ODS 有提到，但「兩邊題庫」都沒題目的節點
-    missing_nodes = []
-    for node in ods_nodes:
-        # 檢查 master bank
-        has_master = node in master_bank and not is_placeholder(master_bank[node].get('beginner', []))
-        # 檢查 extra bank
-        has_extra = node in existing_extra and not is_placeholder(existing_extra[node].get('beginner', []))
-        
-        if not has_master and not has_extra:
-            missing_nodes.append(node)
-    
-    if not missing_nodes:
-        print("[OK] All nodes covered by local bank.")
-        print("[Finish] Task completed successfully!")
-        return
-
-    print(f"[Warning] {len(missing_nodes)} nodes are missing in local bank!")
-    print(f"[Nodes] {', '.join(missing_nodes)}")
-    
-    confirm = input("\nGenerate questions for missing nodes via AI? (y/n): ").strip().lower()
-    if confirm != 'y':
-        print("\n[Skip] Skipping AI generation. You can manually fill these gaps in extra_data.js.")
-        return
-
-    # 第三階段：執行補題 (此時才檢查 API Key)
-    global GROQ_API_KEY
-    if not GROQ_API_KEY:
-        print("\n[Auth] GROQ_API_KEY not found in environment.")
-        key = input("Please enter your GROQ_API_KEY to proceed (or press Enter to cancel): ").strip()
-        if not key:
-            print("[Cancel] AI generation cancelled by user.")
+            df = df[required_cols].copy()
+            df.dropna(subset=['Close', 'Volume'], inplace=True)
+            cutoff_date = (datetime.now() - timedelta(days=180)).date()
+            if len(df[df.index.date >= cutoff_date]) < 20: return None
+            
+            recent_data = df[df.index.date >= cutoff_date]
+            avg_volume = recent_data['Volume'].mean()
+            if pd.isna(avg_volume) or avg_volume < MIN_AVG_VOLUME_SHARES: return None
+            df['Prev_Close'] = df['Close'].shift(1)
+            df['Price_Change'] = (df['Close'] - df['Prev_Close']) / df['Prev_Close']
+            df['High_30_Prev'] = df['High'].shift(1).rolling(window=30).max()
+            df['MA5'] = df['Close'].rolling(window=5).mean()
+            df['Vol_MA5'] = df['Volume'].rolling(window=5).mean()
+            df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
+            df.dropna(subset=['MA5', 'High_30_Prev', 'Price_Change', 'Vol_MA5', 'Vol_MA20'], inplace=True)
+            
+            search_cutoff = (datetime.now() - timedelta(days=90)).date()
+            recent_df = df[df.index.date >= search_cutoff]
+            results = []
+            for i in range(len(recent_df)):
+                row = recent_df.iloc[i]
+                dt = recent_df.index[i]
+                if row['High'] >= row['High_30_Prev'] and row['Price_Change'] >= 0.098:
+                    idx = df.index.get_loc(dt)
+                    post_df = df.iloc[idx + 1 : idx + 11]
+                    for j in range(len(post_df)):
+                        p_row = post_df.iloc[j]
+                        p_dt = post_df.index[j]
+                        if p_row['Low'] <= (p_row['MA5'] * 1.005) and p_row['Close'] >= p_row['MA5']:
+                            is_low_peg, peg_val = self.check_peg_ratio(symbol)
+                            if is_low_peg:
+                                results.append({
+                                    'symbol': symbol.split('.')[0],
+                                    'name': name,
+                                    'industry': group_name,
+                                    'breakout_date': dt.strftime('%Y-%m-%d'),
+                                    'breakout_price': round(float(row['Close']), 2),
+                                    'pullback_date': p_dt.strftime('%Y-%m-%d'),
+                                    'pullback_price': round(float(p_row['Close']), 2),
+                                    'ma5': round(float(p_row['MA5']), 2),
+                                    'peg': peg_val,
+                                    'vol_ma5_lots': round(float(p_row['Vol_MA5']) / 1000, 1),
+                                    'vol_ma20_lots': round(float(p_row['Vol_MA20']) / 1000, 1),
+                                    'avg_vol_6m_lots': round(float(avg_volume) / 1000, 1)
+                                })
+                                break
+            return results
+        except Exception as e:
+            return None
+    def send_telegram_notification(self, results):
+        if not self.tg_token or not self.tg_chat_id:
+            print("[Info] Telegram credentials missing, skipping notification.")
             return
-        GROQ_API_KEY = key
-        refresh_bank.GROQ_API_KEY = key
-
-    print("\n[Step 3] Launching AI Engine...")
-    
-    new_bank = existing_extra.copy()
-    success_count = 0
-    
-    for i, code in enumerate(missing_nodes):
-        desc = all_descriptions.get(code, "No Description")
-        print(f"[Processing] [{i+1}/{len(missing_nodes)}] Generating {code}...")
-        
-        qs = generate_questions(code, desc)
-        if qs:
-            new_bank[code] = {
-                "beginner": qs[:2],
-                "intermediate": qs[2:4],
-                "advanced": qs[4:]
-            }
-            success_count += 1
-            # 存檔 (預防萬一)
-            with open(EXTRA_DATA_PATH, "w", encoding="utf-8") as f:
-                update_time = time.ctime()
-                f.write(f"// 自動補全題庫 - 最後更新: {update_time}\n")
-                f.write(f"const EXTRA_DATA_UPDATE_TIME = '{update_time}';\n")
-                f.write("const EXTRA_QUESTION_BANK = ")
-                json.dump(new_bank, f, ensure_ascii=False, indent=2)
-                f.write(";\n")
-            time.sleep(2) # 避開速率限制
+            
+        date_str = datetime.now().strftime('%Y-%m-%d')
+        msg = f"📊 <b>雲端台股掃描總結 ({date_str})</b>\n\n"
+        if not results:
+            msg += "本日未發現符合教學策略之標的。"
         else:
-            print(f"[Error] Failed to generate {code}.")
-
-    print(f"\n[Finish] Completed! Generated {success_count} nodes.")
-    print(f"[OK] Records saved to {EXTRA_DATA_PATH}")
-    print("\n[Done] Students can now see complete question sets! ✅")
-
+            msg += f"🔥 <b>共發現 {len(results)} 檔潛力標的：</b>\n"
+            for idx, res in enumerate(results[:10]):
+                msg += f"\n{idx+1}. <b>{res['name']} ({res['symbol']})</b>\n"
+                msg += f"   🚀 突破日: {res['breakout_date']}\n"
+                msg += f"   📉 拉回日: {res['pullback_date']}\n"
+                msg += f"   📊 估值 PEG: {res.get('peg', '--')}\n"
+            if len(results) > 10:
+                msg += f"\n... 以及其他 {len(results)-10} 檔。"
+        
+        url = f"https://api.telegram.org/bot{self.tg_token}/sendMessage"
+        try:
+            resp = requests.post(url, json={"chat_id": self.tg_chat_id, "text": msg, "parse_mode": "HTML"}, timeout=15)
+            print(f"[Info] Telegram Status: {resp.status_code}")
+        except Exception as e:
+            print(f"[Error] Failed to send TG: {e}")
+    def upload_to_supabase(self, results):
+        if not self.supabase_url or not self.supabase_key:
+            return
+            
+        try:
+            date_str = datetime.now().strftime('%Y-%m-%d')
+            headers = {
+                "apikey": self.supabase_key,
+                "Authorization": f"Bearer {self.supabase_key}",
+                "Content-Type": "application/json"
+            }
+            
+            # 刪除舊紀錄
+            del_url = f"{self.supabase_url}/rest/v1/stock_scan_results?scan_date=eq.{date_str}"
+            requests.delete(del_url, headers=headers, timeout=15)
+            
+            # 插入新紀錄
+            post_url = f"{self.supabase_url}/rest/v1/stock_scan_results"
+            payload = {
+                "scan_date": date_str,
+                "results": results,
+                "signal_count": len(results)
+            }
+            
+            resp = requests.post(post_url, headers=headers, data=json.dumps(payload), timeout=15)
+            if resp.status_code in [200, 201, 204]:
+                print(f"✅ Supabase Upload Success! ({len(results)} items)")
+            else:
+                print(f"❌ Supabase Upload Failed: {resp.status_code} - {resp.text}")
+                
+        except Exception as e:
+            print(f"[Error] Supabase Error: {e}")
+    def run(self):
+        try:
+            print(f"\n[Start] Launching scanner batch mode...")
+            stocks = self.get_taiwan_stock_codes()
+            all_matches = []
+            batch_size = 50
+            
+            num_batches = (len(stocks) + batch_size - 1) // batch_size
+            
+            for i in range(0, len(stocks), batch_size):
+                batch_idx = i // batch_size + 1
+                batch = stocks[i:i+batch_size]
+                symbols = [s[0] for s in batch]
+                
+                print(f"[Batch {batch_idx}/{num_batches}] Downloading {len(symbols)} symbols...")
+                
+                try:
+                    df_all = yf.download(symbols, period="1y", interval="1d", progress=False, group_by='ticker')
+                    
+                    if df_all is None or df_all.empty:
+                        continue
+                        
+                    for s_code, s_name, s_group in batch:
+                        try:
+                            if isinstance(df_all.columns, pd.MultiIndex):
+                                if s_code in df_all.columns.levels[0]:
+                                    df_stock = df_all[s_code]
+                                else:
+                                    continue
+                            else:
+                                df_stock = df_all
+                                
+                            res = self.process_stock_data(df_stock, s_code, s_name, s_group)
+                            if res: 
+                                all_matches.extend(res)
+                        except:
+                            continue
+                            
+                except Exception as batch_e:
+                    print(f"  [Error] Batch {batch_idx} failed: {batch_e}")
+                    continue
+            
+            all_matches.sort(key=lambda x: x['pullback_date'], reverse=True)
+            self.upload_to_supabase(all_matches)
+            self.send_telegram_notification(all_matches)
+            print(f"\n[Finish] Completed successfully. Total Matches: {len(all_matches)}")
+            
+        except Exception as e:
+            print("\n[CRITICAL ERROR] Scanner crashed!")
+            traceback.print_exc()
+            sys.exit(1)
 if __name__ == "__main__":
-    main()
-
+    scanner = CloudStockScanner()
+    scanner.run()
