@@ -17,10 +17,16 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Environment Diagnostics
+        run: |
+          python --version
+          pip --version
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements_cloud.txt
+          pip list # 列印所有安裝的套件版本以利診斷
 
       - name: Run Cloud Scanner
         env:
